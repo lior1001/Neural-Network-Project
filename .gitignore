@@ -1,0 +1,44 @@
+# Training / inference outputs (large checkpoints & logs)
+outputs/
+
+# Datasets — do not commit images (use Drive / Zenodo / release assets instead)
+data/**/*.jpg
+data/**/*.jpeg
+data/**/*.png
+data/**/*.webp
+data/**/*.bmp
+data/**/*.mp4
+data/**/*.avi
+# Keep small annotation JSON if you want (optional: comment next line to track COCO JSON only)
+data/**/_annotations.coco.json
+
+# Large Open Images / Objects365 metadata (optional)
+data/**/detections.csv
+data/**/image_ids.csv
+
+# Patches / archives
+**/patches/
+**/*.tar.gz
+**/*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Agent / local Cursor (if present)
+.cursor/
