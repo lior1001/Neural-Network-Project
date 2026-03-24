@@ -31,7 +31,7 @@ def parse_args():
     p.add_argument("--blur_p", type=float, default=0.0)
     p.add_argument("--plateau_patience", type=int, default=5)
     p.add_argument("--plateau_factor", type=float, default=0.5)
-    p.add_argument("--early_stop_patience", type=int, default=8)
+    p.add_argument("--early_stop_patience", type=int, default=12)
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--log_dir", type=Path, default=Path("outputs/stage2_helmet_logs"))
     p.add_argument("--out_dir", type=Path, default=Path("outputs/stage2_helmet"))
@@ -195,6 +195,21 @@ def main():
                 model.load_state_dict(sd, strict=True)
                 start_epoch = ckpt.get("epoch", 1) + 1
                 best_val_miou = ckpt.get("best_val_miou", -1.0)
+                no_improve = ckpt.get("no_improve", 0)
+
+                # If resuming after Phase B started, rebuild optimizer with unfrozen block.
+                if start_epoch > args.head_only_epochs + 1:
+                    model.unfreeze_last_block()
+                    optimizer = _build_phase_b_optimizer(model, args)
+                    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                        optimizer, mode="max", patience=args.plateau_patience,
+                        factor=args.plateau_factor, min_lr=1e-6,
+                    )
+
+                if "optimizer_state" in ckpt:
+                    optimizer.load_state_dict(ckpt["optimizer_state"])
+                if "scheduler_state" in ckpt:
+                    scheduler.load_state_dict(ckpt["scheduler_state"])
                 print(f"Resumed from {p.name}, epoch {start_epoch-1}, best mIoU {best_val_miou:.4f}")
                 break
 
@@ -230,15 +245,31 @@ def main():
             + (" ← best" if is_best else "")
         )
 
-        ckpt = {"epoch": epoch, "model_state": model.state_dict(), "best_val_miou": best_val_miou}
-        torch.save(ckpt, args.out_dir / "last.pt")
         if is_best:
             best_val_miou = vi
             no_improve = 0
+            ckpt = {
+                "epoch": epoch,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
+                "best_val_miou": best_val_miou,
+                "no_improve": no_improve,
+            }
+            torch.save(ckpt, args.out_dir / "last.pt")
             torch.save({**ckpt, "best_val_miou": best_val_miou}, args.out_dir / "best.pt")
             print(f"  → Saved best.pt  (val mIoU={best_val_miou:.4f})")
         else:
             no_improve += 1
+            ckpt = {
+                "epoch": epoch,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
+                "best_val_miou": best_val_miou,
+                "no_improve": no_improve,
+            }
+            torch.save(ckpt, args.out_dir / "last.pt")
 
         if args.early_stop_patience > 0 and no_improve >= args.early_stop_patience:
             print(f"Early stopping: val mIoU no improvement for {args.early_stop_patience} epochs.")
