@@ -1,5 +1,13 @@
 """
 Stage 2 dataset: crop around cyclist/bicycle, regress helmet box in the crop.
+
+KEY IMPROVEMENT over previous version:
+- During training, the bicycle box used to build the crop is randomly jittered
+  (shifted and rescaled) to simulate imperfect stage 1 predictions at inference
+  time. This is the most important fix for helmet box misalignment: the model
+  learns to be robust to the small errors in stage 1's bicycle box.
+- crop_height_frac is now a parameter (default 0.70) to handle BMX/aggressive
+  forward-lean riders where the helmet sits lower relative to the bicycle box.
 """
 
 from __future__ import annotations
@@ -28,25 +36,60 @@ def make_stage2_crop_xyxy(
     bicycle_bbox_xywh: Tuple[float, float, float, float],
     img_w: float,
     img_h: float,
+    crop_height_frac: float = 0.70,
 ) -> Tuple[int, int, int, int]:
     """
     Build a crop focused on the rider's upper body and bike cockpit area.
 
-    The crop intentionally keeps more horizontal context than vertical context
-    because forward-leaning cyclists move the helmet toward the handlebars.
+    crop_height_frac: fraction of the bicycle box height to include vertically.
+    Increase from the old 0.58 to handle forward-leaning/BMX riders where
+    the helmet is lower in the frame relative to the bicycle box.
     """
     x, y, w, h = bicycle_bbox_xywh
     x1 = max(0.0, x - 0.10 * w)
     y1 = max(0.0, y - 0.12 * h)
     x2 = min(img_w, x + 1.10 * w)
-    y2 = min(img_h, y + 0.58 * h)
+    y2 = min(img_h, y + crop_height_frac * h)
 
-    # Enforce at least a 2×2 crop to avoid degenerate boxes.
     if x2 <= x1 + 1:
         x2 = min(img_w, x1 + 2)
     if y2 <= y1 + 1:
         y2 = min(img_h, y1 + 2)
     return int(x1), int(y1), int(x2), int(y2)
+
+
+def _jitter_bbox_xywh(
+    bbox_xywh: Tuple[float, float, float, float],
+    img_w: float,
+    img_h: float,
+    shift_frac: float = 0.05,
+    scale_frac: float = 0.7,
+) -> Tuple[float, float, float, float]:
+    """
+    Apply random jitter to a bounding box to simulate stage 1 prediction noise.
+
+    shift_frac: max shift as fraction of box size (e.g. 0.08 = ±8% of w/h)
+    scale_frac: max scale change as fraction (e.g. 0.10 = ±10% size change)
+
+    This makes stage 2 robust to small errors in the stage 1 bicycle box,
+    which is the main cause of helmet box misalignment at inference time.
+    """
+    x, y, w, h = bbox_xywh
+    # Random shift
+    dx = random.uniform(-shift_frac, shift_frac) * w
+    dy = random.uniform(-shift_frac, shift_frac) * h
+    # Random scale
+    scale = 1.0 + random.uniform(-scale_frac, scale_frac)
+    new_w = w * scale
+    new_h = h * scale
+    new_x = x + dx
+    new_y = y + dy
+    # Clamp to image bounds
+    new_x = max(0.0, min(img_w - new_w, new_x))
+    new_y = max(0.0, min(img_h - new_h, new_y))
+    new_w = max(1.0, min(img_w - new_x, new_w))
+    new_h = max(1.0, min(img_h - new_y, new_h))
+    return new_x, new_y, new_w, new_h
 
 
 class HelmetCropDataset(Dataset):
@@ -65,6 +108,10 @@ class HelmetCropDataset(Dataset):
         max_instances_per_class: Optional[int] = 1,
         blur_p: float = 0.0,
         include_filenames_from_dir: Optional[Path] = None,
+        crop_height_frac: float = 0.70,
+        # Jitter augmentation parameters — applied only during training
+        crop_jitter_shift: float = 0.08,
+        crop_jitter_scale: float = 0.10,
     ) -> None:
         self.images_dir = Path(images_dir)
         self.input_size = input_size
@@ -72,6 +119,10 @@ class HelmetCropDataset(Dataset):
         self.require_all_classes = require_all_classes
         self.max_instances_per_class = max_instances_per_class
         self.blur_p = blur_p
+        self.crop_height_frac = crop_height_frac
+        self.crop_jitter_shift = crop_jitter_shift
+        self.crop_jitter_scale = crop_jitter_scale
+
         self.include_filenames_from_dir = (
             Path(include_filenames_from_dir) if include_filenames_from_dir is not None else None
         )
@@ -183,8 +234,20 @@ class HelmetCropDataset(Dataset):
         image = Image.open(sample["path"]).convert("RGB")
         img_w, img_h = image.size
 
+        # During training, randomly jitter the bicycle box to simulate stage 1 noise.
+        # This is the key change: stage 2 must learn to localize the helmet even when
+        # the crop boundary is slightly off, just like at inference time.
+        bike_bbox = bicycle_ann.bbox_xywh
+        if self.train and (self.crop_jitter_shift > 0 or self.crop_jitter_scale > 0):
+            bike_bbox = _jitter_bbox_xywh(
+                bike_bbox, float(img_w), float(img_h),
+                shift_frac=self.crop_jitter_shift,
+                scale_frac=self.crop_jitter_scale,
+            )
+
         crop_x1, crop_y1, crop_x2, crop_y2 = make_stage2_crop_xyxy(
-            bicycle_ann.bbox_xywh, float(img_w), float(img_h)
+            bike_bbox, float(img_w), float(img_h),
+            crop_height_frac=self.crop_height_frac,
         )
         crop = image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
 
